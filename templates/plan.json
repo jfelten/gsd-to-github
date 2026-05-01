@@ -1,0 +1,13 @@
+{
+  "plan_name": "PLAN_NAME",
+  "project": "OWNER/PROJECT_NUMBER",
+  "repository": "OWNER/REPO",
+  "tasks": [
+    {
+      "title": "Task title",
+      "description": "## Goal\nWhat this task accomplishes.\n\n## Done criteria\n- [ ] Criterion 1\n- [ ] Criterion 2",
+      "labels": [],
+      "depends_on": []
+    }
+  ]
+}
