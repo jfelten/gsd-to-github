@@ -35,7 +35,7 @@ Based on the user's request, route to the appropriate workflow:
 - Push a GSD milestone directly to GitHub → first `gsd-to-plan-json`, then `push-plan`
 
 **Working on tasks:**
-- Pull/claim the next actionable task → `workflows/pull-plan.md`
+- Pull/claim the next actionable task → `workflows/pull-plan.md` (programmatic, generic) or `workflows/claim-plan.sh` (interactive Bash, ez-appsec-specific)
 - Complete the current task → `workflows/complete-plan.md`
 
 **Setup and discovery:**
@@ -68,7 +68,8 @@ DONE_OPTION_ID      - Node ID of the "Done" option
 
 <success_criteria>
 - Plans pushed to GitHub create one issue per task with correct labels, dependencies, and project board status
-- Pulling a task respects dependency order — only claims tasks whose dependencies are all Done
+- Pulling/claiming a task respects dependency order — only claims tasks whose dependencies are all Done
 - Completing a task pushes the branch, sets board status to Done, and cleans up the context file
 - GSD milestone roadmaps can be converted to plan JSON and pushed in one workflow
+- Bash workflow (`claim-plan.sh`) validates prerequisites and provides interactive guidance
 </success_criteria>
