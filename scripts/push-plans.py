@@ -17,88 +17,15 @@ Configuration (environment variables or ~/git/.env):
 """
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
-
-ENV_FILE = Path.home() / "git" / ".env"
-
-
-def load_env():
-    """Load key=value pairs from ~/git/.env into a dict."""
-    env = {}
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("#") or "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            env[key.strip()] = val.strip()
-    return env
-
-
-def get_config(env_vars):
-    """Resolve configuration from environment, falling back to ~/git/.env."""
-    file_env = load_env()
-
-    def get(key, default=None):
-        return os.environ.get(key) or file_env.get(key) or default
-
-    token = get("GITHUB_ACCESS_TOKEN") or get("GH_TOKEN") or get("GITHUB_TOKEN")
-    if not token:
-        print("ERROR: No GitHub token found. Set GITHUB_ACCESS_TOKEN in ~/git/.env or GH_TOKEN in environment.", file=sys.stderr)
-        sys.exit(1)
-
-    return {
-        "token": token,
-        "status_field_id": get("STATUS_FIELD_ID"),
-        "todo_option_id": get("TODO_OPTION_ID"),
-    }
-
-
-def gh(*args, token=None):
-    env = os.environ.copy()
-    if token:
-        env["GH_TOKEN"] = token
-    result = subprocess.run(
-        ["gh"] + list(args),
-        capture_output=True, text=True, env=env,
-    )
-    if result.returncode != 0:
-        print(f"gh {' '.join(args[:3])}... failed:\n{result.stderr}", file=sys.stderr)
-        sys.exit(1)
-    return result.stdout.strip()
-
-
-def gh_graphql(query, token):
-    env = os.environ.copy()
-    env["GH_TOKEN"] = token
-    result = subprocess.run(
-        ["gh", "api", "graphql", "-f", f"query={query}"],
-        capture_output=True, text=True, env=env,
-    )
-    if result.returncode != 0:
-        print(f"GraphQL failed:\n{result.stderr}", file=sys.stderr)
-        sys.exit(1)
-    return json.loads(result.stdout)
-
-
-def get_project_id(owner, number, token):
-    for entity_type in ["organization", "user"]:
-        try:
-            data = gh_graphql(f'''
-                query {{
-                    {entity_type}(login: "{owner}") {{
-                        projectV2(number: {number}) {{ id }}
-                    }}
-                }}
-            ''', token)
-            return data["data"][entity_type]["projectV2"]["id"]
-        except (KeyError, TypeError):
-            continue
-    print(f"ERROR: Could not find project {owner}/{number}", file=sys.stderr)
-    sys.exit(1)
+from lib import (
+    get_config,
+    get_project_id,
+    gh,
+    update_project_item_status,
+)
 
 
 def create_issue(repo, title, body, labels, token):
@@ -128,23 +55,6 @@ def add_to_project(owner, number, issue_url, token):
     return data["id"]
 
 
-def set_status_todo(project_id, item_id, config):
-    if not config["status_field_id"] or not config["todo_option_id"]:
-        print("WARNING: STATUS_FIELD_ID or TODO_OPTION_ID not set — skipping status update", file=sys.stderr)
-        return
-    mutation = f'''
-        mutation {{
-            updateProjectV2ItemFieldValue(input: {{
-                projectId: "{project_id}"
-                itemId: "{item_id}"
-                fieldId: "{config['status_field_id']}"
-                value: {{ singleSelectOptionId: "{config['todo_option_id']}" }}
-            }}) {{ projectV2Item {{ id }} }}
-        }}
-    '''
-    gh_graphql(mutation, config["token"])
-
-
 def build_issue_body(task, plan_name, repo, created_issues):
     depends_on = task.get("depends_on", [])
     body_parts = [
@@ -168,6 +78,41 @@ def build_issue_body(task, plan_name, repo, created_issues):
     return "\n".join(body_parts)
 
 
+def validate_plan(plan):
+    required = ["plan_name", "project", "repository", "tasks"]
+    missing = [k for k in required if k not in plan]
+    if missing:
+        print(f"ERROR: Plan missing required fields: {', '.join(missing)}", file=sys.stderr)
+        sys.exit(1)
+
+    if not plan["tasks"]:
+        print("ERROR: Plan has no tasks", file=sys.stderr)
+        sys.exit(1)
+
+    for i, task in enumerate(plan["tasks"]):
+        if "title" not in task or not task["title"].strip():
+            print(f"ERROR: Task at index {i} missing required 'title' field", file=sys.stderr)
+            sys.exit(1)
+        if "description" not in task or not task["description"].strip():
+            print(f"ERROR: Task at index {i} missing required 'description' field", file=sys.stderr)
+            sys.exit(1)
+        for dep_idx in task.get("depends_on", []):
+            if not isinstance(dep_idx, int) or dep_idx < 0 or dep_idx >= len(plan["tasks"]):
+                print(
+                    f"ERROR: Task at index {i} has invalid dependency index {dep_idx} "
+                    f"(must be 0..{len(plan['tasks']) - 1})",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if dep_idx >= i:
+                print(
+                    f"ERROR: Task at index {i} depends on task {dep_idx} which comes after it "
+                    f"(forward dependency)",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+
 def main():
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} <plan.json>", file=sys.stderr)
@@ -179,16 +124,7 @@ def main():
         sys.exit(1)
 
     plan = json.loads(plan_path.read_text())
-
-    required = ["plan_name", "project", "repository", "tasks"]
-    missing = [k for k in required if k not in plan]
-    if missing:
-        print(f"ERROR: Plan missing required fields: {', '.join(missing)}", file=sys.stderr)
-        sys.exit(1)
-
-    if not plan["tasks"]:
-        print("ERROR: Plan has no tasks", file=sys.stderr)
-        sys.exit(1)
+    validate_plan(plan)
 
     plan_name = plan["plan_name"]
     repo = plan["repository"]
@@ -204,7 +140,7 @@ def main():
     print(f"Tasks: {len(tasks)}")
     print()
 
-    config = get_config(None)
+    config, _ = get_config(["STATUS_FIELD_ID", "TODO_OPTION_ID"])
     token = config["token"]
     project_id = get_project_id(owner, number, token)
 
@@ -222,7 +158,14 @@ def main():
         print(f"#{issue_number}", end=" ", flush=True)
 
         item_id = add_to_project(owner, number, issue_url, token)
-        set_status_todo(project_id, item_id, config)
+
+        status_field_id = config.get("status_field_id")
+        todo_option_id = config.get("todo_option_id")
+        if status_field_id and todo_option_id:
+            update_project_item_status(project_id, item_id, status_field_id, todo_option_id, token)
+        else:
+            print("(skipped status — STATUS_FIELD_ID or TODO_OPTION_ID not set)", end=" ", file=sys.stderr)
+
         print("-> Todo")
 
         created_issues.append((issue_number, title))

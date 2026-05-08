@@ -44,6 +44,11 @@ fi
 
 ISSUE_NUMBER="$1"
 
+if ! [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
+  err "Issue number must be a positive integer, got: $ISSUE_NUMBER"
+  exit 1
+fi
+
 # ── Prerequisite checks ───────────────────────────────────────────────────────
 
 echo "Checking prerequisites..."
@@ -178,20 +183,20 @@ for item in items:
 ")
 
 if [[ -n "$ITEM_ID" ]]; then
-  PROJECT_ID=$(gh api graphql -f query="
-    query { organization(login: \"${PROJECT_OWNER}\") { projectV2(number: ${PROJECT_NUMBER}) { id } } }
-  " --jq '.data.organization.projectV2.id')
+  PROJECT_ID=$(gh api graphql -f query='
+    query { organization(login: "'"${PROJECT_OWNER}"'") { projectV2(number: '"${PROJECT_NUMBER}"') { id } } }
+  ' --jq '.data.organization.projectV2.id')
 
-  gh api graphql -f query="
+  gh api graphql -f query='
     mutation {
       updateProjectV2ItemFieldValue(input: {
-        projectId: \"${PROJECT_ID}\"
-        itemId: \"${ITEM_ID}\"
-        fieldId: \"${STATUS_FIELD_ID}\"
-        value: { singleSelectOptionId: \"${IN_PROGRESS_OPTION_ID}\" }
+        projectId: "'"${PROJECT_ID}"'"
+        itemId: "'"${ITEM_ID}"'"
+        fieldId: "'"${STATUS_FIELD_ID}"'"
+        value: { singleSelectOptionId: "'"${IN_PROGRESS_OPTION_ID}"'" }
       }) { projectV2Item { id } }
     }
-  " &>/dev/null && ok "Moved issue to 'In Progress' on the project board" \
+  ' &>/dev/null && ok "Moved issue to 'In Progress' on the project board" \
                  || warn "Could not update project board status (permissions issue — update manually)"
 else
   warn "Issue not found on project board — add it manually if needed"

@@ -19,99 +19,19 @@ Configuration (environment variables or ~/git/.env):
 import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
+from lib import (
+    get_config,
+    get_project_id,
+    gh,
+    run_cmd,
+    update_project_item_status,
+)
 
-ENV_FILE = Path.home() / "git" / ".env"
+
 CONTEXT_FILE = ".plan-context.md"
-
-
-def load_env():
-    env = {}
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("#") or "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            env[key.strip()] = val.strip()
-    return env
-
-
-def get_config():
-    file_env = load_env()
-
-    def get(key, default=None):
-        return os.environ.get(key) or file_env.get(key) or default
-
-    token = get("GITHUB_ACCESS_TOKEN") or get("GH_TOKEN") or get("GITHUB_TOKEN")
-    if not token:
-        print("ERROR: No GitHub token found.", file=sys.stderr)
-        sys.exit(1)
-
-    owner = get("PROJECT_OWNER")
-    number = get("PROJECT_NUMBER")
-    if not owner or not number:
-        print("ERROR: PROJECT_OWNER and PROJECT_NUMBER must be set.", file=sys.stderr)
-        sys.exit(1)
-
-    return {
-        "token": token,
-        "owner": owner,
-        "number": int(number),
-        "status_field_id": get("STATUS_FIELD_ID"),
-        "done_option_id": get("DONE_OPTION_ID"),
-    }
-
-
-def run(cmd, **kwargs):
-    return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-
-
-def gh(*args, token=None):
-    env = os.environ.copy()
-    if token:
-        env["GH_TOKEN"] = token
-    result = subprocess.run(
-        ["gh"] + list(args),
-        capture_output=True, text=True, env=env,
-    )
-    if result.returncode != 0:
-        print(f"gh {' '.join(args[:3])}... failed:\n{result.stderr}", file=sys.stderr)
-        sys.exit(1)
-    return result.stdout.strip()
-
-
-def gh_graphql(query, token):
-    env = os.environ.copy()
-    env["GH_TOKEN"] = token
-    result = subprocess.run(
-        ["gh", "api", "graphql", "-f", f"query={query}"],
-        capture_output=True, text=True, env=env,
-    )
-    if result.returncode != 0:
-        print(f"GraphQL failed:\n{result.stderr}", file=sys.stderr)
-        sys.exit(1)
-    return json.loads(result.stdout)
-
-
-def get_project_id(owner, number, token):
-    for entity_type in ["organization", "user"]:
-        try:
-            data = gh_graphql(f'''
-                query {{
-                    {entity_type}(login: "{owner}") {{
-                        projectV2(number: {number}) {{ id }}
-                    }}
-                }}
-            ''', token)
-            return data["data"][entity_type]["projectV2"]["id"]
-        except (KeyError, TypeError):
-            continue
-    print(f"ERROR: Could not find project {owner}/{number}", file=sys.stderr)
-    sys.exit(1)
 
 
 def parse_context():
@@ -161,23 +81,6 @@ def find_project_item_id(config, issue_number):
     return None
 
 
-def set_status_done(project_id, item_id, config):
-    if not config["status_field_id"] or not config["done_option_id"]:
-        print("WARNING: STATUS_FIELD_ID or DONE_OPTION_ID not set — skipping status update", file=sys.stderr)
-        return
-    mutation = f'''
-        mutation {{
-            updateProjectV2ItemFieldValue(input: {{
-                projectId: "{project_id}"
-                itemId: "{item_id}"
-                fieldId: "{config['status_field_id']}"
-                value: {{ singleSelectOptionId: "{config['done_option_id']}" }}
-            }}) {{ projectV2Item {{ id }} }}
-        }}
-    '''
-    gh_graphql(mutation, config["token"])
-
-
 def main():
     repo_override = None
     if "--repo" in sys.argv:
@@ -186,13 +89,31 @@ def main():
             repo_override = sys.argv[idx + 1]
 
     context = parse_context()
-    config = get_config()
+    config, get = get_config(["PROJECT_OWNER", "PROJECT_NUMBER", "STATUS_FIELD_ID", "DONE_OPTION_ID"])
     token = config["token"]
+
+    owner = config["project_owner"]
+    number_str = config["project_number"]
+    if not owner or not number_str:
+        print("ERROR: PROJECT_OWNER and PROJECT_NUMBER must be set.", file=sys.stderr)
+        sys.exit(1)
+    number = int(number_str)
+
+    config["owner"] = owner
+    config["number"] = number
 
     issue_number = context.get("issue_number")
     branch = context.get("branch")
-    repo = repo_override or context.get("repo", f"{config['owner']}/ez-appsec")
+    repo = repo_override or context.get("repo")
     title = context.get("title", f"task-{issue_number}")
+
+    if not repo:
+        print(
+            "ERROR: No repository found. Set --repo or ensure .plan-context.md "
+            "contains a '# Repository:' line.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if not issue_number:
         print("ERROR: Could not parse issue number from .plan-context.md", file=sys.stderr)
@@ -206,18 +127,18 @@ def main():
     print(f"Branch: {branch}")
     print(f"Repository: {repo}")
 
-    current_branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    current_branch = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"])
     if current_branch.stdout.strip() != branch:
-        check = run(["git", "show-ref", "--verify", f"refs/heads/{branch}"])
+        check = run_cmd(["git", "show-ref", "--verify", f"refs/heads/{branch}"])
         if check.returncode == 0:
             print(f"Switching to existing branch: {branch}")
-            result = run(["git", "checkout", branch])
+            result = run_cmd(["git", "checkout", branch])
             if result.returncode != 0:
                 print(f"ERROR: git checkout failed:\n{result.stderr}", file=sys.stderr)
                 sys.exit(1)
         else:
             print(f"Creating branch: {branch}")
-            result = run(["git", "checkout", "-b", branch])
+            result = run_cmd(["git", "checkout", "-b", branch])
             if result.returncode != 0:
                 print(f"ERROR: git checkout -b failed:\n{result.stderr}", file=sys.stderr)
                 sys.exit(1)
@@ -225,19 +146,24 @@ def main():
     print(f"Pushing {branch} to origin...")
     env = os.environ.copy()
     env["GH_TOKEN"] = token
-    result = run(["git", "push", "-u", "origin", branch], env=env)
+    result = run_cmd(["git", "push", "-u", "origin", branch], env=env)
     if result.returncode != 0:
         print(f"WARNING: git push failed:\n{result.stderr}", file=sys.stderr)
         print("Continuing to mark project item as Done...")
     else:
         print("Push successful.")
 
-    project_id = get_project_id(config["owner"], config["number"], token)
+    project_id = get_project_id(owner, number, token)
     item_id = find_project_item_id(config, issue_number)
 
     if item_id:
-        set_status_done(project_id, item_id, config)
-        print(f"Project board: #{issue_number} -> Done")
+        status_field_id = config.get("status_field_id")
+        done_option_id = config.get("done_option_id")
+        if status_field_id and done_option_id:
+            update_project_item_status(project_id, item_id, status_field_id, done_option_id, token)
+            print(f"Project board: #{issue_number} -> Done")
+        else:
+            print("WARNING: STATUS_FIELD_ID or DONE_OPTION_ID not set — skipping status update", file=sys.stderr)
     else:
         print(f"WARNING: Issue #{issue_number} not found on project board", file=sys.stderr)
 
